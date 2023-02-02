@@ -89,11 +89,15 @@ class Args(args.Args):
         resource=Account,
         description="the AWS account to grant access to",
         groups=(OrgUnitGroup, TagGroup),
+        rule_element=args.FormElement.MULTISELECT,
+        request_element=args.FormElement.INPUT
     )
     permission_set = args.Resource(
         title="Permission Set",
         resource=PermissionSet,
         description="the AWS permission set to grant access to",
+        request_element=args.FormElement.INPUT,
+        rule_element=args.FormElement.MULTISELECT
     )
 
     # class Output:
