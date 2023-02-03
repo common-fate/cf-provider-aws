@@ -90,21 +90,16 @@ class Args(args.Args):
         description="the AWS account to grant access to",
         groups=(OrgUnitGroup, TagGroup),
         rule_element=args.FormElement.MULTISELECT,
-        request_element=args.FormElement.INPUT
+        request_element=args.FormElement.SELECT
     )
     permission_set = args.Resource(
         title="Permission Set",
         resource=PermissionSet,
         description="the AWS permission set to grant access to",
-        request_element=args.FormElement.INPUT,
-        rule_element=args.FormElement.MULTISELECT
+        rule_element=args.FormElement.MULTISELECT,
+        request_element=args.FormElement.SELECT,
     )
-
-    # class Output:
-    #     account_assignment = args.Output(
-    #         resource=AccountAssignment,
-    #     )
-
+  
 
 @provider.grant()
 def grant(p: Provider, subject, args: Args) -> provider.GrantResult:
