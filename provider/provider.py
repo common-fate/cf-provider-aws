@@ -1,9 +1,11 @@
 import typing
 from commonfate_provider import provider, args, diagnostics, resources, tasks
 import boto3
-
+import botocore.session
+from botocore.credentials import AssumeRoleCredentialFetcher, DeferredRefreshableCredentials
 from treelib import Tree
 import re
+
 
 class OrgUnit(resources.Resource):
     parent: typing.Optional[str] = resources.Related("OrgUnit")
@@ -54,14 +56,15 @@ class Provider(provider.Provider):
     instance_arn = provider.String(usage="the AWS SSO instance ARN")
     identity_store_id = provider.String(usage="the AWS SSO identity store ID")
     region = provider.String(usage="the AWS SSO instance region")
+    sso_role_arn = provider.String(usage="The ARN of the AWS IAM Role with permission to administer SSO", )
 
     def __init__(self, config_loader):
         super().__init__(config_loader)
-        self.org_client = boto3.client("organizations", region_name=self.region.get())
-        self.sso_client = boto3.client("sso-admin", region_name=self.region.get())
-        self.idstore_client = boto3.client(
-            "identitystore", region_name=self.region.get()
-        )
+             
+        self.org_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('organizations', region_name=self.region.get())
+        self.sso_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('sso-admin', region_name=self.region.get())
+        self.idstore_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('identitystore', region_name=self.region.get())
+
 
 
 def all_accounts(tree: Tree, org_unit_id: str) -> typing.List[str]:
@@ -163,9 +166,25 @@ def revoke(p: Provider, subject, args: Args):
     )
 
 
+@provider.config_validator(name="Verify AWS organization access")
+def can_describe_organization(p: Provider, diagnostics: diagnostics.Logs) -> None:
+   
+    res = p.org_client.describe_organization()
+    
+    if len(res["Organization"]) > 0:
+        diagnostics.info("Successfully described org")
+
+@provider.config_validator(name="Assume AWS SSO Access Role")
+def can_assume_sso_role(p: Provider, diagnostics: diagnostics.Logs) -> None:
+   
+    diagnostics.info("Some message")
+
 @provider.config_validator(name="List Users")
 def can_list_users(p: Provider, diagnostics: diagnostics.Logs) -> None:
-    diagnostics.info("some message here")
+    res = p.idstore_client.list_users(IdentityStoreId=p.identity_store_id.get())
+    
+    if len(res["Users"]) >= 0:
+        diagnostics.info("Successfully pulled users ")
 
 
 @provider.grant_validator(name="User Exists")
@@ -490,3 +509,30 @@ def fetch_users(p: Provider):
 @resources.fetcher
 def fetch_groups(p: Provider):
     tasks.call(ListGroups())
+
+
+#got implementation from this stackoverflow https://stackoverflow.com/questions/44171849/aws-boto3-assumerole-example-which-includes-role-usage
+def get_boto3_session(role_arn=None):
+    session = boto3.Session()
+    if not role_arn:
+        return session
+
+    fetcher = AssumeRoleCredentialFetcher(
+        client_creator=_get_client_creator(session),
+        source_credentials=session.get_credentials(),
+        role_arn=role_arn,
+    )
+    botocore_session = botocore.session.Session()
+    botocore_session._credentials = DeferredRefreshableCredentials(
+        method='assume-role',
+        refresh_using=fetcher.fetch_credentials
+    )
+
+    return boto3.Session(botocore_session=botocore_session)
+
+
+def _get_client_creator(session):
+    def client_creator(service_name, **kwargs):
+        return session.client(service_name, **kwargs)
+
+    return client_creator
