@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import typing
 from commonfate_provider import provider, args, diagnostics, resources, tasks
 import boto3
@@ -5,12 +6,20 @@ import botocore.session
 from botocore.credentials import AssumeRoleCredentialFetcher, DeferredRefreshableCredentials
 from treelib import Tree
 import re
+from retrying import retry
+
 
 
 class OrgUnit(resources.Resource):
     parent: typing.Optional[str] = resources.Related("OrgUnit")
     name: typing.Optional[str] = resources.Name()
 
+
+@dataclass
+class SSOUser:
+    UserId: str
+    UserName: str
+    
 
 class Account(resources.Resource):
     tags: dict = {}
@@ -66,6 +75,65 @@ class Provider(provider.Provider):
         self.idstore_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('identitystore', region_name=self.region.get())
 
 
+    def ensure_account_exists(self, accountId) -> bool:
+        try:
+            out = self.org_client.describe_account(AccountId=accountId)
+        except Exception as e:
+            print('failed to find account' + str(e))
+            return False
+        
+        return True
+    
+    def get_user(self, subject) -> SSOUser | None:
+        #try get user first by filtering username
+        try:
+            
+            out = self.idstore_client.list_users(
+                IdentityStoreId=self.identity_store_id.get(),
+                MaxResults=1,
+                Filters=[
+                    {
+                        'AttributePath': 'UserName',
+                        'AttributeValue': subject
+                    }
+                ]
+            )
+        except Exception as e:
+            print("an error occured getting list of users" + str(e))
+            return None
+        
+        if len(out["Users"]) != 0:
+            return SSOUser(UserId=out["Users"][0]['UserId'], UserName=out["Users"][0]['UserName'])
+
+        #if we didnt find the user via the username
+        # list all users and find a match in the subject email 
+        
+        has_more  = True
+        next_token = ""
+        
+        while has_more:
+            try: 
+                users = self.idstore_client.list_users(
+                    IdentityStoreId=self.identity_store_id.get(),
+                    NextToken=next_token
+
+                )
+            except:
+                print("an error occured getting list of users")
+                return None
+
+            for user in users["Users"]:
+                for email in user["Emails"]:
+                    if email['Value'] == subject:
+                        return SSOUser(UserId=user['UserId'], UserName=user['UserName'])
+            
+            next_token = users["NextToken"]
+            has_more = next_token != ""
+            
+        return None
+        
+  
+           
 
 def all_accounts(tree: Tree, org_unit_id: str) -> typing.List[str]:
     """
@@ -146,6 +214,42 @@ class Args(args.Args):
         rule_element=args.FormElement.MULTISELECT,
         request_element=args.FormElement.SELECT,
     )
+    
+#retry for 2 minutes
+@retry(stop_max_delay=60000*2)
+def check_account_assignment_status(p: Provider, request_id):
+      
+    acc_assignment = p.sso_client.describe_account_assignment_creation_status(
+        InstanceArn=p.instance_arn.get(),
+        AccountAssignmentCreationRequestId=request_id
+    )
+    
+    if acc_assignment["AccountAssignmentCreationStatus"]["Status"] == "SUCCEEDED":
+        print('success')
+        return acc_assignment
+    else:
+        if acc_assignment["AccountAssignmentCreationStatus"]["Status"] == "FAILED":
+            return acc_assignment
+        # print(acc_assignment["AccountAssignmentCreationStatus"]["Status"])
+        raise Exception('not finished yet')
+        
+@retry(stop_max_delay=60000*2)
+def check_account_deletion_status(p: Provider, request_id):
+      
+    acc_assignment = p.sso_client.describe_account_assignment_deletion_status(
+        InstanceArn=p.instance_arn.get(),
+        AccountAssignmentDeletionRequestId=request_id
+    )
+    
+    if acc_assignment["AccountAssignmentDeletionStatus"]["Status"] == "SUCCEEDED":
+        print('success')
+        return acc_assignment
+    else:
+        if acc_assignment["AccountAssignmentDeletionStatus"]["Status"] == "FAILED":
+            return acc_assignment
+        # print(acc_assignment["AccountAssignmentDeletionStatus"]["Status"])
+        raise Exception('not finished yet') 
+
   
 
 @provider.grant()
@@ -153,7 +257,43 @@ def grant(p: Provider, subject, args: Args) -> provider.GrantResult:
     print(
         f"granting access to {subject}, group={args.account}, url={p.instance_arn.get()}"
     )
+    
+    #ensure account exists in the org
+    account_exists = p.ensure_account_exists(args.account)
+    
+    if not account_exists:
+        print('Could not find account')
+        return
+    
+    #find the user id from the email address subject
+    user = p.get_user(subject)
+    
+    if user is None:
+        print('could not find user')
+        return
+    #call aws to create the account assignment to the permissions set
+    
+    acc_assignment = p.sso_client.create_account_assignment(
+        InstanceArn=p.instance_arn.get(),
+        PermissionSetArn=args.permission_set,
+        PrincipalType="USER",
+        PrincipalId=user.UserId,
+        TargetId=args.account,
+        TargetType="AWS_ACCOUNT",
+    )
+    
+   
+    #poll the assignment api to see if the assignment was successful 
+    res = check_account_assignment_status(p, acc_assignment["AccountAssignmentCreationStatus"]["RequestId"])
+    
+    print(res)
+    #log the success or failure of the grant
+    if res["AccountAssignmentCreationStatus"]["Status"] != "SUCCEEDED":
+        print('Error creating account assigment')
+        print(res["AccountAssignmentCreationStatus"]["FailureReason"])
+        
 
+    print('Successfully granted')
     return provider.GrantResult(
         access_instructions="this is how to access the permissions"
     )
@@ -161,6 +301,43 @@ def grant(p: Provider, subject, args: Args) -> provider.GrantResult:
 
 @provider.revoke()
 def revoke(p: Provider, subject, args: Args):
+     #ensure account exists in the org
+    account_exists = p.ensure_account_exists(args.account)
+    
+    if not account_exists:
+        print('Could not find account')
+        return
+    
+    #find the user id from the email address subject
+    user = p.get_user(subject)
+    
+    if user is None:
+        print('could not find user')
+        return
+    #call aws to create the account assignment to the permissions set
+    
+    acc_assignment = p.sso_client.delete_account_assignment(
+        InstanceArn=p.instance_arn.get(),
+        PermissionSetArn=args.permission_set,
+        PrincipalType="USER",
+        PrincipalId=user.UserId,
+        TargetId=args.account,
+        TargetType="AWS_ACCOUNT",
+    )
+    
+   
+    #poll the assignment api to see if the assignment was successful 
+    res = check_account_deletion_status(p, acc_assignment["AccountAssignmentDeletionStatus"]["RequestId"])
+    
+    print(res)
+    #log the success or failure of the grant
+    if res["AccountAssignmentDeletionStatus"]["Status"] != "SUCCEEDED":
+        print('Error deleting account assigment')
+        print(res["AccountAssignmentDeletionStatus"]["FailureReason"])
+        
+
+    print('Successfully revoked')
+    
     print(
         f"revoking access from {subject}, group={args.account}, url={p.instance_arn.get()}"
     )
