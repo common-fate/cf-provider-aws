@@ -7,7 +7,7 @@ from botocore.credentials import AssumeRoleCredentialFetcher, DeferredRefreshabl
 from treelib import Tree
 import re
 from retrying import retry
-
+from typing import Optional
 
 
 class OrgUnit(resources.Resource):
@@ -84,7 +84,7 @@ class Provider(provider.Provider):
         
         return True
     
-    def get_user(self, subject) -> SSOUser | None:
+    def get_user(self, subject) -> Optional[SSOUser]:
         #try get user first by filtering username
         try:
             
