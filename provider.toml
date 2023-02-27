@@ -2,5 +2,5 @@ language = "python3.9"
 
 [python]
 class = "provider.Provider"
-arg_schema = "provider.Args"
+arg_schema = "provider.Target"
 requirements_file = "requirements.txt"
