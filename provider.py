@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import typing
-from commonfate_provider import provider, target, diagnostics, resources, tasks
+from commonfate_provider import provider, target, access, diagnostics, resources, tasks
 import boto3
 import botocore.session
 from botocore.credentials import AssumeRoleCredentialFetcher, DeferredRefreshableCredentials
@@ -69,13 +69,11 @@ class Provider(provider.Provider):
     identity_store_id = provider.String(usage="the AWS SSO identity store ID")
     region = provider.String(usage="the AWS SSO instance region")
     sso_role_arn = provider.String(usage="The ARN of the AWS IAM Role with permission to administer SSO", )
-
-    def __init__(self, config_loader):
-        super().__init__(config_loader)
-             
+    def setup(self):
         self.org_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('organizations', region_name=self.region.get())
         self.sso_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('sso-admin', region_name=self.region.get())
         self.idstore_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('identitystore', region_name=self.region.get())
+        return super().setup()
 
 
     def ensure_account_exists(self, accountId) -> bool:
@@ -137,8 +135,8 @@ class Provider(provider.Provider):
         
 
 
-
-class Target(target.Target):
+@access.target()
+class Account():
     account = target.Resource(
         title="Account",
         resource=Account,
@@ -187,8 +185,8 @@ def check_account_deletion_status(p: Provider, request_id):
 
   
 
-@provider.grant()
-def grant(p: Provider, subject, target: Target) -> provider.GrantResult:
+@access.grant()
+def grant(p: Provider, subject, target: Account) -> access.GrantResult:
     print(
         f"granting access to {subject}, group={target.account}, url={p.instance_arn.get()}"
     )
@@ -229,13 +227,13 @@ def grant(p: Provider, subject, target: Target) -> provider.GrantResult:
         
 
     print('Successfully granted')
-    return provider.GrantResult(
+    return access.GrantResult(
         access_instructions="this is how to access the permissions"
     )
 
 
-@provider.revoke()
-def revoke(p: Provider, subject, target: Target):
+@access.revoke()
+def revoke(p: Provider, subject, target: Account):
      #ensure account exists in the org
     account_exists = p.ensure_account_exists(target.account)
     
@@ -298,15 +296,6 @@ def can_list_users(p: Provider, diagnostics: diagnostics.Logs) -> None:
     if len(res["Users"]) >= 0:
         diagnostics.info("Successfully pulled users ")
 
-
-@provider.grant_validator(name="User Exists")
-def user_exists(p: Provider, subject: str, args: Target):
-    pass
-
-
-@provider.grant_validator(name="Account Exists")
-def account_exists(p: Provider, subject: str, args: Target):
-    account = resources.query(Account).all()
 
 def next_token(page: typing.Optional[str]) -> dict:
     """
