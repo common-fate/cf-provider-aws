@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import typing
-from commonfate_provider import provider, args, diagnostics, resources, tasks
+from commonfate_provider import provider, target, access, diagnostics, resources, tasks
 import boto3
 import botocore.session
 from botocore.credentials import AssumeRoleCredentialFetcher, DeferredRefreshableCredentials
@@ -24,7 +24,9 @@ class SSOUser:
 class Account(resources.Resource):
     tags: dict = {}
     name: typing.Optional[str] = resources.Name()
-    org_unit: str = resources.Related(OrgUnit)
+    parent_org_unit: str = resources.Related(OrgUnit, title="AWS Organizational Unit", description="A parent organizational unit for the account")
+    # root/ou-1/ou2/
+    org_unit_path: str
 
 
 class PermissionSet(resources.Resource):
@@ -61,18 +63,17 @@ class AccountAssignment(resources.Resource):
     user: typing.Optional[str] = resources.Related(User)
     group: typing.Optional[str] = resources.Related(Group)
 
+
 class Provider(provider.Provider):
     instance_arn = provider.String(usage="the AWS SSO instance ARN")
     identity_store_id = provider.String(usage="the AWS SSO identity store ID")
     region = provider.String(usage="the AWS SSO instance region")
     sso_role_arn = provider.String(usage="The ARN of the AWS IAM Role with permission to administer SSO", )
-
-    def __init__(self, config_loader):
-        super().__init__(config_loader)
-             
+    def setup(self):
         self.org_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('organizations', region_name=self.region.get())
         self.sso_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('sso-admin', region_name=self.region.get())
         self.idstore_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('identitystore', region_name=self.region.get())
+        return super().setup()
 
 
     def ensure_account_exists(self, accountId) -> bool:
@@ -132,87 +133,19 @@ class Provider(provider.Provider):
             
         return None
         
-  
-           
-
-def all_accounts(tree: Tree, org_unit_id: str) -> typing.List[str]:
-    """
-    look through the children of the tree node recursively to find all accounts
-    belong to the OU with ID `org_unit_id`
-    """
-    accounts: typing.List[str] = []
-    childs = tree.children(org_unit_id)
-    for child in childs:
-        if isinstance(child.data, Account):
-            accounts.append(child.data.id)
-        if isinstance(child.data, OrgUnit):
-            child_accounts = all_accounts(tree, child.data.id)
-            accounts = accounts + child_accounts
-
-    return accounts
 
 
-class OrgUnitGroup(args.Group):
-    title = "Org Unit"
-    description = "The AWS Organizational Unit"
-    resource = OrgUnit
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        # build a tree containing the accounts and org units
-
-        accounts = resources.query(Account).all()
-        ous = resources.query(OrgUnit).all()
-        self.tree = Tree()
-        for ou in ous:
-            self.tree.create_node(identifier=ou.id, parent=ou.parent, data=ou)
-
-        for account in accounts:
-            self.tree.create_node(
-                identifier=account.id, parent=account.org_unit, data=account
-            )
-
-    def match(self, key):
-        matching_accounts = all_accounts(self.tree, key)
-        return matching_accounts
-
-
-class TagGroup(args.Group):
-    title = "Tag"
-    description = "The AWS account tag"
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.accounts = resources.query(Account).all()
-
-    def match(self, key):
-        matching_accounts: typing.List[str] = []
-        # split 'mytag=myvalue' into ['mytag', 'myvalue']
-        [tag, pattern] = key.split("=", 1)
-        for account in self.accounts:
-            value = account.tags.get(tag)
-            if value is not None and re.match(pattern, value):
-                matching_accounts.append(account.id)
-
-        return matching_accounts
-
-
-class Args(args.Args):
-    account = args.Resource(
+@access.target()
+class Account():
+    account = target.Resource(
         title="Account",
         resource=Account,
         description="the AWS account to grant access to",
-        groups=(OrgUnitGroup, TagGroup),
-        rule_element=args.FormElement.MULTISELECT,
-        request_element=args.FormElement.SELECT
     )
-    permission_set = args.Resource(
+    permission_set = target.Resource(
         title="Permission Set",
         resource=PermissionSet,
         description="the AWS permission set to grant access to",
-        rule_element=args.FormElement.MULTISELECT,
-        request_element=args.FormElement.SELECT,
     )
     
 #retry for 2 minutes
@@ -252,14 +185,14 @@ def check_account_deletion_status(p: Provider, request_id):
 
   
 
-@provider.grant()
-def grant(p: Provider, subject, args: Args) -> provider.GrantResult:
+@access.grant()
+def grant(p: Provider, subject, target: Account) -> access.GrantResult:
     print(
-        f"granting access to {subject}, group={args.account}, url={p.instance_arn.get()}"
+        f"granting access to {subject}, group={target.account}, url={p.instance_arn.get()}"
     )
     
     #ensure account exists in the org
-    account_exists = p.ensure_account_exists(args.account)
+    account_exists = p.ensure_account_exists(target.account)
     
     if not account_exists:
         print('Could not find account')
@@ -275,10 +208,10 @@ def grant(p: Provider, subject, args: Args) -> provider.GrantResult:
     
     acc_assignment = p.sso_client.create_account_assignment(
         InstanceArn=p.instance_arn.get(),
-        PermissionSetArn=args.permission_set,
+        PermissionSetArn=target.permission_set,
         PrincipalType="USER",
         PrincipalId=user.UserId,
-        TargetId=args.account,
+        TargetId=target.account,
         TargetType="AWS_ACCOUNT",
     )
     
@@ -294,15 +227,15 @@ def grant(p: Provider, subject, args: Args) -> provider.GrantResult:
         
 
     print('Successfully granted')
-    return provider.GrantResult(
+    return access.GrantResult(
         access_instructions="this is how to access the permissions"
     )
 
 
-@provider.revoke()
-def revoke(p: Provider, subject, args: Args):
+@access.revoke()
+def revoke(p: Provider, subject, target: Account):
      #ensure account exists in the org
-    account_exists = p.ensure_account_exists(args.account)
+    account_exists = p.ensure_account_exists(target.account)
     
     if not account_exists:
         print('Could not find account')
@@ -318,10 +251,10 @@ def revoke(p: Provider, subject, args: Args):
     
     acc_assignment = p.sso_client.delete_account_assignment(
         InstanceArn=p.instance_arn.get(),
-        PermissionSetArn=args.permission_set,
+        PermissionSetArn=target.permission_set,
         PrincipalType="USER",
         PrincipalId=user.UserId,
-        TargetId=args.account,
+        TargetId=target.account,
         TargetType="AWS_ACCOUNT",
     )
     
@@ -339,7 +272,7 @@ def revoke(p: Provider, subject, args: Args):
     print('Successfully revoked')
     
     print(
-        f"revoking access from {subject}, group={args.account}, url={p.instance_arn.get()}"
+        f"revoking access from {subject}, group={target.account}, url={p.instance_arn.get()}"
     )
 
 
@@ -364,15 +297,6 @@ def can_list_users(p: Provider, diagnostics: diagnostics.Logs) -> None:
         diagnostics.info("Successfully pulled users ")
 
 
-@provider.grant_validator(name="User Exists")
-def user_exists(p: Provider, subject: str, args: Args):
-    pass
-
-
-@provider.grant_validator(name="Account Exists")
-def account_exists(p: Provider, subject: str, args: Args):
-    account = resources.query(Account).all()
-
 def next_token(page: typing.Optional[str]) -> dict:
     """
     returns a type-safe next token for use with boto3
@@ -381,10 +305,6 @@ def next_token(page: typing.Optional[str]) -> dict:
         return {}  # type: ignore
     return {"NextToken": page}
 
-
-class OrgUnitContext(resources.Context):
-    parent_id: str
-    page: typing.Optional[str] = None
 
 
 class ListChildrenForOU(tasks.Task):
@@ -405,7 +325,7 @@ class ListChildrenForOU(tasks.Task):
                 tasks.call(DescribeOU(id=id, parent_id=self.parent_id))
                 # recursively list children for the child OU to traverse the full org tree.
                 tasks.call(ListChildrenForOU(parent_id=id))
-                tasks.call(ListAccountsForOU(parent_id=id))
+                tasks.call(ListAccountsForOU(parent_id=id, ou_path=id))
         if res.get("NextToken") is not None:
             # iterate through pages
             self.page = res["NextToken"]
@@ -429,6 +349,7 @@ class DescribeOU(tasks.Task):
 
 
 class ListAccountsForOU(tasks.Task):
+    ou_path: str
     parent_id: str
     page: typing.Optional[str] = None
 
@@ -436,11 +357,15 @@ class ListAccountsForOU(tasks.Task):
         res = p.org_client.list_children(
             ParentId=self.parent_id, ChildType="ACCOUNT", **next_token(self.page)
         )
-        for account in res["Children"]:
-            id = account.get("Id")
-            if id is not None:
+        for child in res["Children"]:
+            
+            if child.get("Type") == "ACCOUNT":
                 tasks.call(
-                    DescribeAccount(account_id=id, org_unit=self.parent_id),
+                    DescribeAccount(account_id=child.get("Id"), org_unit=self.parent_id, ou_path=self.ou_path),
+                )
+            if child.get("Type") == "ORGANIZATIONAL_UNIT":
+                tasks.call(
+                    ListAccountsForOU(parent_id=child.get("Id"), ou_path="/".join(self.ou_path,child.get("Id")))
                 )
         if res.get("NextToken") is not None:
             # iterate through pages
@@ -451,14 +376,16 @@ class ListAccountsForOU(tasks.Task):
 class DescribeAccount(tasks.Task):
     account_id: str
     org_unit: str
+    ou_path: str
 
     def run(self, p):
         res = p.org_client.describe_account(AccountId=self.account_id)
         name = res["Account"].get("Name")
         acc = Account(
-            org_unit=self.org_unit,
+            parent_org_unit=self.org_unit,
             id=self.account_id,
             name=name,
+            org_unit_path=self.ou_path
         )
 
         # find the tags associated with the account
