@@ -4,15 +4,13 @@ from commonfate_provider import provider, target, access, diagnostics, resources
 import boto3
 import botocore.session
 from botocore.credentials import AssumeRoleCredentialFetcher, DeferredRefreshableCredentials
-from treelib import Tree
-import re
 from retrying import retry
 from typing import Optional
 
 
 class OrgUnit(resources.Resource):
     parent: typing.Optional[str] = resources.Related("OrgUnit")
-    name: typing.Optional[str] = resources.Name()
+    name: str
 
 
 @dataclass
@@ -23,18 +21,18 @@ class SSOUser:
 
 class Account(resources.Resource):
     tags: dict = {}
-    name: typing.Optional[str] = resources.Name()
+    name: str
     parent_org_unit: str = resources.Related(OrgUnit, title="AWS Organizational Unit", description="A parent organizational unit for the account")
     # root/ou-1/ou2/
     org_unit_path: str
 
 
 class PermissionSet(resources.Resource):
-    name: typing.Optional[str] = resources.Name()
+    name: str
 
 
 class ManagedPolicy(resources.Resource):
-    name: typing.Optional[str] = resources.Name()
+    name: str
 
 
 class ManagedPolicyAttachment(resources.Resource):
@@ -43,13 +41,13 @@ class ManagedPolicyAttachment(resources.Resource):
 
 
 class Group(resources.Resource):
-    name: typing.Optional[str] = resources.Name()
+    name: str
     description: typing.Optional[str] = None
 
 
 class User(resources.Resource):
-    email: str = resources.UserEmail()
-    name: typing.Optional[str] = resources.Name()
+    email: str
+    name: str
 
 
 class GroupMembership(resources.Resource):
@@ -70,9 +68,12 @@ class Provider(provider.Provider):
     region = provider.String(usage="the AWS SSO instance region")
     sso_role_arn = provider.String(usage="The ARN of the AWS IAM Role with permission to administer SSO", )
     def setup(self):
-        self.org_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('organizations', region_name=self.region.get())
-        self.sso_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('sso-admin', region_name=self.region.get())
-        self.idstore_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('identitystore', region_name=self.region.get())
+        try:
+            self.org_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('organizations', region_name=self.region.get())
+            self.sso_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('sso-admin', region_name=self.region.get())
+            self.idstore_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('identitystore', region_name=self.region.get())
+        except:
+            pass
         return super().setup()
 
 

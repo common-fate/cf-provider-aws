@@ -121,7 +121,7 @@ celerybeat.pid
 
 # Environments
 .env
-.venv
+.venv/**
 env/
 venv/
 ENV/
@@ -172,3 +172,6 @@ resources.json
 resources
 
 .venv
+
+test-entrypoint.sh
+test-entrypoint.py
