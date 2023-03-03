@@ -136,8 +136,8 @@ class Provider(provider.Provider):
         
 
 
-@access.target()
-class Account():
+@access.target(kind="Account")
+class AccountTarget():
     account = target.Resource(
         title="Account",
         resource=Account,
@@ -187,24 +187,22 @@ def check_account_deletion_status(p: Provider, request_id):
   
 
 @access.grant()
-def grant(p: Provider, subject, target: Account) -> access.GrantResult:
+def grant(p: Provider, subject, target: AccountTarget) -> access.GrantResult:
     print(
-        f"granting access to {subject}, group={target.account}, url={p.instance_arn.get()}"
+        f"granting access to {subject}, account={target.account}, permissionSetArn={target.permission_set}"
     )
     
     #ensure account exists in the org
     account_exists = p.ensure_account_exists(target.account)
     
     if not account_exists:
-        print('Could not find account')
-        return
+        raise Exception('Could not find account')
     
     #find the user id from the email address subject
     user = p.get_user(subject)
     
     if user is None:
-        print('could not find user')
-        return
+        raise Exception('could not find user')
     #call aws to create the account assignment to the permissions set
     
     acc_assignment = p.sso_client.create_account_assignment(
@@ -223,8 +221,7 @@ def grant(p: Provider, subject, target: Account) -> access.GrantResult:
     print(res)
     #log the success or failure of the grant
     if res["AccountAssignmentCreationStatus"]["Status"] != "SUCCEEDED":
-        print('Error creating account assigment')
-        print(res["AccountAssignmentCreationStatus"]["FailureReason"])
+        raise Exception(f'Error creating account assigment: {res["AccountAssignmentCreationStatus"]["FailureReason"]}')
         
 
     print('Successfully granted')
@@ -234,20 +231,22 @@ def grant(p: Provider, subject, target: Account) -> access.GrantResult:
 
 
 @access.revoke()
-def revoke(p: Provider, subject, target: Account):
+def revoke(p: Provider, subject, target: AccountTarget):
+    print(
+        f"revoking access from {subject}, account={target.account}, permissionSetArn={target.permission_set}"
+    )
+
      #ensure account exists in the org
     account_exists = p.ensure_account_exists(target.account)
     
     if not account_exists:
-        print('Could not find account')
-        return
+        raise Exception('Could not find account')
     
     #find the user id from the email address subject
     user = p.get_user(subject)
     
     if user is None:
-        print('could not find user')
-        return
+        raise Exception('could not find user')
     #call aws to create the account assignment to the permissions set
     
     acc_assignment = p.sso_client.delete_account_assignment(
@@ -266,15 +265,9 @@ def revoke(p: Provider, subject, target: Account):
     print(res)
     #log the success or failure of the grant
     if res["AccountAssignmentDeletionStatus"]["Status"] != "SUCCEEDED":
-        print('Error deleting account assigment')
-        print(res["AccountAssignmentDeletionStatus"]["FailureReason"])
+        raise Exception(f'Error deleting account assigment: {res["AccountAssignmentDeletionStatus"]["FailureReason"]}')
         
-
     print('Successfully revoked')
-    
-    print(
-        f"revoking access from {subject}, group={target.account}, url={p.instance_arn.get()}"
-    )
 
 
 @provider.config_validator(name="Verify AWS organization access")
@@ -350,7 +343,7 @@ class DescribeOU(tasks.Task):
 
 
 class ListAccountsForOU(tasks.Task):
-    ou_path: str
+    ou_path: str = ""
     parent_id: str
     page: typing.Optional[str] = None
 
@@ -382,11 +375,7 @@ class DescribeAccount(tasks.Task):
     def run(self, p):
         res = p.org_client.describe_account(AccountId=self.account_id)
         name = res["Account"].get("Name")
-        acc = Account(
-            parent_org_unit=self.org_unit,
-            id=self.account_id,
-            name=name,
-            org_unit_path=self.ou_path
+        acc = Account(id=self.account_id,parent_org_unit=self.org_unit,name=name,org_unit_path=self.ou_path
         )
 
         # find the tags associated with the account
@@ -407,7 +396,7 @@ def fetch_org_structure(p: Provider):
     root_id = root.get("Id")
     if root_id is None:
         raise Exception("could not find org root")
-    resources.register(OrgUnit(id=root_id))
+    resources.register(OrgUnit(id=root_id, name="Root"))
     tasks.call(ListChildrenForOU(parent_id=root_id))
     tasks.call(ListAccountsForOU(parent_id=root_id))
 
@@ -554,8 +543,8 @@ class ListUsers(tasks.Task):
                 ),
                 None,
             )
-            if primary_email is not None:
-                resources.register(User(id=u["UserId"], email=primary_email))
+            if primary_email is not None and primary_email != "":
+                resources.register(User(id=u["UserId"], email=primary_email, name=primary_email))
 
         if res.get("NextToken") is not None:
             self.page = res.get("NextToken")
