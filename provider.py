@@ -69,13 +69,9 @@ class Provider(provider.Provider):
     sso_role_arn = provider.String(description="The ARN of the AWS IAM Role with permission to administer SSO")
 
     def setup(self):
-        try:
-            self.org_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('organizations', region_name=self.region.get())
-            self.sso_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('sso-admin', region_name=self.region.get())
-            self.idstore_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('identitystore', region_name=self.region.get())
-        except:
-            pass
-        return super().setup()
+        self.org_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('organizations', region_name=self.region.get())
+        self.sso_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('sso-admin', region_name=self.region.get())
+        self.idstore_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('identitystore', region_name=self.region.get())
 
 
     def ensure_account_exists(self, accountId) -> bool:
