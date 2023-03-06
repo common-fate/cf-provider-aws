@@ -10,7 +10,6 @@ from typing import Optional
 
 class OrgUnit(resources.Resource):
     parent: typing.Optional[str] = resources.Related("OrgUnit")
-    name: str
 
 
 @dataclass
@@ -28,34 +27,32 @@ class Account(resources.Resource):
 
 
 class PermissionSet(resources.Resource):
-    name: str
+    pass
 
 
 class ManagedPolicy(resources.Resource):
-    name: str
+    pass
 
 
-class ManagedPolicyAttachment(resources.Resource):
+class ManagedPolicyAttachment(resources.BaseResource):
     permission_set: str = resources.Related(PermissionSet)
     managed_policy: str = resources.Related(ManagedPolicy)
 
 
 class Group(resources.Resource):
-    name: str
     description: typing.Optional[str] = None
 
 
 class User(resources.Resource):
     email: str
-    name: str
 
 
-class GroupMembership(resources.Resource):
+class GroupMembership(resources.BaseResource):
     user: str = resources.Related(User)
     group: str = resources.Related(Group)
 
 
-class AccountAssignment(resources.Resource):
+class AccountAssignment(resources.BaseResource):
     permission_set: str = resources.Related(PermissionSet)
     account: str = resources.Related(Account)
     user: typing.Optional[str] = resources.Related(User)
@@ -184,7 +181,7 @@ def check_account_deletion_status(p: Provider, request_id):
   
 
 @access.grant()
-def grant(p: Provider, subject, target: AccountTarget) -> access.GrantResult:
+def grant(p: Provider, subject: str, target: AccountTarget) -> access.GrantResult:
     print(
         f"granting access to {subject}, account={target.account}, permissionSetArn={target.permission_set}"
     )
@@ -228,7 +225,7 @@ def grant(p: Provider, subject, target: AccountTarget) -> access.GrantResult:
 
 
 @access.revoke()
-def revoke(p: Provider, subject, target: AccountTarget):
+def revoke(p: Provider, subject: str, target: AccountTarget):
     print(
         f"revoking access from {subject}, account={target.account}, permissionSetArn={target.permission_set}"
     )
@@ -386,7 +383,7 @@ class DescribeAccount(tasks.Task):
         resources.register(acc)
 
 
-@resources.fetcher
+@resources.loader
 def fetch_org_structure(p: Provider):
     list_roots = p.org_client.list_roots()
     root = list_roots["Roots"][0]
@@ -519,7 +516,7 @@ class DescribeAccountAssignment(tasks.Task):
             tasks.call(self)
 
 
-@resources.fetcher
+@resources.loader
 def fetch_permission_sets(p: Provider):
     tasks.call(ListPermissionSets())
 
@@ -592,12 +589,12 @@ class ListGroupMemberships(tasks.Task):
             tasks.call(self)
 
 
-@resources.fetcher
+@resources.loader
 def fetch_users(p: Provider):
     tasks.call(ListUsers())
 
 
-@resources.fetcher
+@resources.loader
 def fetch_groups(p: Provider):
     tasks.call(ListGroups())
 

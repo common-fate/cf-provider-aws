@@ -1,0 +1,61 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "sso:DescribeAccountAssignmentDeletionStatus",
+        "sso:DescribeAccountAssignmentCreationStatus",
+        "sso:DescribePermissionSet",
+        "sso:ListPermissionSets",
+        "sso:ListTagsForResource",
+        "sso:ListAccountAssignments",
+        "sso:ListManagedPoliciesInPermissionSet",
+        "sso:ListAccountsForProvisionedPermissionSet",
+        "organizations:ListAccounts",
+        "organizations:ListAccountsForParent",
+        "organizations:DescribeAccount",
+        "organizations:DescribeOrganization",
+        "iam:GetSAMLProvider",
+        "iam:GetRole",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies",
+        "identitystore:ListUsers",
+        "iam:ListRoles",
+        "iam:ListUsers",
+        "organizations:ListRoots",
+        "organizations:ListChildren",
+        "organizations:DescribeOrganizationalUnit",
+        "organizations:ListParents",
+        "organizations:ListDelegatedAdministrators",
+        "organizations:ListPolicies",
+        "organizations:ListPoliciesForTarget",
+        "organizations:ListTagsForResource",
+        "organizations:ListTargetsForPolicy",
+        "identitystore:ListGroupMemberships",
+        "identitystore:IsMemberInGroups",
+        "identitystore:ListGroups",
+        "identitystore:GetGroupId",
+        "identitystore:GetUserId",
+        "identitystore:DescribeUser",
+        "identitystore:DescribeGroupMembership",
+        "identitystore:DescribeGroup",
+        "identitystore:GetGroupMembershipId"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "ReadSSO"
+    },
+    {
+      "Action": [
+        "sso:DeletePermissionSet",
+        "sso:DeleteAccountAssignment",
+        "sso:CreatePermissionSet",
+        "sso:PutInlinePolicyToPermissionSet",
+        "sso:CreateAccountAssignment"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "AssignSSO"
+    }
+  ],
+  "Version": "2012-10-17"
+}
