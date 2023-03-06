@@ -63,10 +63,11 @@ class AccountAssignment(resources.Resource):
 
 
 class Provider(provider.Provider):
-    instance_arn = provider.String(usage="the AWS SSO instance ARN")
-    identity_store_id = provider.String(usage="the AWS SSO identity store ID")
-    region = provider.String(usage="the AWS SSO instance region")
-    sso_role_arn = provider.String(usage="The ARN of the AWS IAM Role with permission to administer SSO", )
+    instance_arn = provider.String(description="the AWS SSO instance ARN")
+    identity_store_id = provider.String(description="the AWS SSO identity store ID")
+    region = provider.String(description="the AWS SSO instance region")
+    sso_role_arn = provider.String(description="The ARN of the AWS IAM Role with permission to administer SSO")
+
     def setup(self):
         try:
             self.org_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('organizations', region_name=self.region.get())
