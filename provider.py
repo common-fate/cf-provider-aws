@@ -3,9 +3,14 @@ import typing
 from commonfate_provider import provider, target, access, diagnostics, resources, tasks
 import boto3
 import botocore.session
-from botocore.credentials import AssumeRoleCredentialFetcher, DeferredRefreshableCredentials
+from botocore.credentials import (
+    AssumeRoleCredentialFetcher,
+    DeferredRefreshableCredentials,
+)
 from retrying import retry
-from typing import Optional
+import structlog
+
+log = structlog.get_logger()
 
 
 class OrgUnit(resources.Resource):
@@ -16,12 +21,16 @@ class OrgUnit(resources.Resource):
 class SSOUser:
     UserId: str
     UserName: str
-    
+
 
 class Account(resources.Resource):
     tags: dict = {}
     name: str
-    parent_org_unit: str = resources.Related(OrgUnit, title="AWS Organizational Unit", description="A parent organizational unit for the account")
+    parent_org_unit: str = resources.Related(
+        OrgUnit,
+        title="AWS Organizational Unit",
+        description="A parent organizational unit for the account",
+    )
     # root/ou-1/ou2/
     org_unit_path: str
 
@@ -60,78 +69,62 @@ class AccountAssignment(resources.BaseResource):
 
 
 class Provider(provider.Provider):
-    instance_arn = provider.String(description="the AWS SSO instance ARN")
-    identity_store_id = provider.String(description="the AWS SSO identity store ID")
-    region = provider.String(description="the AWS SSO instance region")
-    sso_role_arn = provider.String(description="The ARN of the AWS IAM Role with permission to administer SSO")
+    sso_instance_arn = provider.String(description="the AWS SSO instance ARN")
+    sso_identity_store_id = provider.String(description="the AWS SSO identity store ID")
+    sso_region = provider.String(description="the AWS SSO instance region")
+    sso_role_arn = provider.String(
+        description="The ARN of the AWS IAM Role with permission to administer SSO"
+    )
 
     def setup(self):
-        self.org_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('organizations', region_name=self.region.get())
-        self.sso_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('sso-admin', region_name=self.region.get())
-        self.idstore_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client('identitystore', region_name=self.region.get())
+        self.org_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client(
+            "organizations", region_name=self.sso_region.get()
+        )
+        self.sso_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client(
+            "sso-admin", region_name=self.sso_region.get()
+        )
+        self.idstore_client = get_boto3_session(
+            role_arn=self.sso_role_arn.get()
+        ).client("identitystore", region_name=self.sso_region.get())
 
+    def get_user(self, subject) -> SSOUser:
+        # try get user first by filtering username
+        out = self.idstore_client.list_users(
+            IdentityStoreId=self.sso_identity_store_id.get(),
+            MaxResults=1,
+            Filters=[{"AttributePath": "UserName", "AttributeValue": subject}],
+        )
 
-    def ensure_account_exists(self, accountId) -> bool:
-        try:
-            out = self.org_client.describe_account(AccountId=accountId)
-        except Exception as e:
-            print('failed to find account' + str(e))
-            return False
-        
-        return True
-    
-    def get_user(self, subject) -> Optional[SSOUser]:
-        #try get user first by filtering username
-        try:
-            
-            out = self.idstore_client.list_users(
-                IdentityStoreId=self.identity_store_id.get(),
-                MaxResults=1,
-                Filters=[
-                    {
-                        'AttributePath': 'UserName',
-                        'AttributeValue': subject
-                    }
-                ]
-            )
-        except Exception as e:
-            print("an error occured getting list of users" + str(e))
-            return None
-        
         if len(out["Users"]) != 0:
-            return SSOUser(UserId=out["Users"][0]['UserId'], UserName=out["Users"][0]['UserName'])
+            return SSOUser(
+                UserId=out["Users"][0]["UserId"], UserName=out["Users"][0]["UserName"]
+            )
 
-        #if we didnt find the user via the username
-        # list all users and find a match in the subject email 
-        
-        has_more  = True
+        # if we didnt find the user via the username
+        # list all users and find a match in the subject email
+
+        has_more = True
         next_token = ""
-        
-        while has_more:
-            try: 
-                users = self.idstore_client.list_users(
-                    IdentityStoreId=self.identity_store_id.get(),
-                    NextToken=next_token
 
-                )
-            except:
-                print("an error occured getting list of users")
-                return None
+        while has_more:
+            users = self.idstore_client.list_users(
+                IdentityStoreId=self.sso_identity_store_id.get(),
+                NextToken=next_token,
+            )
 
             for user in users["Users"]:
                 for email in user["Emails"]:
-                    if email['Value'] == subject:
-                        return SSOUser(UserId=user['UserId'], UserName=user['UserName'])
-            
+                    if email["Value"] == subject:
+                        return SSOUser(UserId=user["UserId"], UserName=user["UserName"])
+
             next_token = users["NextToken"]
             has_more = next_token != ""
-            
-        return None
-        
+
+        raise Exception(f"user {subject} does not exist in AWS SSO directory")
 
 
 @access.target(kind="Account")
-class AccountTarget():
+class AccountTarget:
     account = target.Resource(
         title="Account",
         resource=Account,
@@ -142,147 +135,125 @@ class AccountTarget():
         resource=PermissionSet,
         description="the AWS permission set to grant access to",
     )
-    
-#retry for 2 minutes
-@retry(stop_max_delay=60000*2)
+
+
+class NotReadyError(Exception):
+    pass
+
+
+def retry_on_notready(exc):
+    return isinstance(exc, NotReadyError)
+
+
+# retry for 2 minutes
+@retry(stop_max_delay=60000 * 2, retry_on_exception=retry_on_notready)
 def check_account_assignment_status(p: Provider, request_id):
-      
     acc_assignment = p.sso_client.describe_account_assignment_creation_status(
-        InstanceArn=p.instance_arn.get(),
-        AccountAssignmentCreationRequestId=request_id
+        InstanceArn=p.sso_instance_arn.get(),
+        AccountAssignmentCreationRequestId=request_id,
     )
-    
+
     if acc_assignment["AccountAssignmentCreationStatus"]["Status"] == "SUCCEEDED":
-        print('success')
         return acc_assignment
     else:
         if acc_assignment["AccountAssignmentCreationStatus"]["Status"] == "FAILED":
             return acc_assignment
-        # print(acc_assignment["AccountAssignmentCreationStatus"]["Status"])
-        raise Exception('not finished yet')
-        
-@retry(stop_max_delay=60000*2)
+
+        # trigger a retry
+        raise NotReadyError
+
+
+@retry(stop_max_delay=60000 * 2, retry_on_exception=retry_on_notready)
 def check_account_deletion_status(p: Provider, request_id):
-      
     acc_assignment = p.sso_client.describe_account_assignment_deletion_status(
-        InstanceArn=p.instance_arn.get(),
-        AccountAssignmentDeletionRequestId=request_id
+        InstanceArn=p.sso_instance_arn.get(),
+        AccountAssignmentDeletionRequestId=request_id,
     )
-    
+
     if acc_assignment["AccountAssignmentDeletionStatus"]["Status"] == "SUCCEEDED":
-        print('success')
         return acc_assignment
     else:
         if acc_assignment["AccountAssignmentDeletionStatus"]["Status"] == "FAILED":
             return acc_assignment
-        # print(acc_assignment["AccountAssignmentDeletionStatus"]["Status"])
-        raise Exception('not finished yet') 
 
-  
+        # trigger a retry
+        raise NotReadyError
+
 
 @access.grant()
 def grant(p: Provider, subject: str, target: AccountTarget) -> access.GrantResult:
-    print(
-        f"granting access to {subject}, account={target.account}, permissionSetArn={target.permission_set}"
-    )
-    
-    #ensure account exists in the org
-    account_exists = p.ensure_account_exists(target.account)
-    
-    if not account_exists:
-        raise Exception('Could not find account')
-    
-    #find the user id from the email address subject
+    # find the user id from the email address subject
     user = p.get_user(subject)
-    
-    if user is None:
-        raise Exception('could not find user')
-    #call aws to create the account assignment to the permissions set
-    
+
     acc_assignment = p.sso_client.create_account_assignment(
-        InstanceArn=p.instance_arn.get(),
+        InstanceArn=p.sso_instance_arn.get(),
         PermissionSetArn=target.permission_set,
         PrincipalType="USER",
         PrincipalId=user.UserId,
         TargetId=target.account,
         TargetType="AWS_ACCOUNT",
     )
-    
-   
-    #poll the assignment api to see if the assignment was successful 
-    res = check_account_assignment_status(p, acc_assignment["AccountAssignmentCreationStatus"]["RequestId"])
-    
-    print(res)
-    #log the success or failure of the grant
-    if res["AccountAssignmentCreationStatus"]["Status"] != "SUCCEEDED":
-        raise Exception(f'Error creating account assigment: {res["AccountAssignmentCreationStatus"]["FailureReason"]}')
-        
 
-    print('Successfully granted')
-    return access.GrantResult(
-        access_instructions="this is how to access the permissions"
+    log.info("created account assignment", result=acc_assignment)
+
+    # poll the assignment api to see if the assignment was successful
+    res = check_account_assignment_status(
+        p, acc_assignment["AccountAssignmentCreationStatus"]["RequestId"]
     )
+
+    log.info("checked account assignment status", result=res)
+
+    # log the success or failure of the grant
+    if res["AccountAssignmentCreationStatus"]["Status"] != "SUCCEEDED":
+        raise Exception(
+            f'Error creating account assigment: {res["AccountAssignmentCreationStatus"]["FailureReason"]}'
+        )
 
 
 @access.revoke()
 def revoke(p: Provider, subject: str, target: AccountTarget):
-    print(
-        f"revoking access from {subject}, account={target.account}, permissionSetArn={target.permission_set}"
-    )
-
-     #ensure account exists in the org
-    account_exists = p.ensure_account_exists(target.account)
-    
-    if not account_exists:
-        raise Exception('Could not find account')
-    
-    #find the user id from the email address subject
+    # find the user id from the email address subject
     user = p.get_user(subject)
-    
-    if user is None:
-        raise Exception('could not find user')
-    #call aws to create the account assignment to the permissions set
-    
+
     acc_assignment = p.sso_client.delete_account_assignment(
-        InstanceArn=p.instance_arn.get(),
+        InstanceArn=p.sso_instance_arn.get(),
         PermissionSetArn=target.permission_set,
         PrincipalType="USER",
         PrincipalId=user.UserId,
         TargetId=target.account,
         TargetType="AWS_ACCOUNT",
     )
-    
-   
-    #poll the assignment api to see if the assignment was successful 
-    res = check_account_deletion_status(p, acc_assignment["AccountAssignmentDeletionStatus"]["RequestId"])
-    
-    print(res)
-    #log the success or failure of the grant
+
+    log.info("deleted account assignment", result=acc_assignment)
+
+    # poll the assignment api to see if the assignment was successful
+    res = check_account_deletion_status(
+        p, acc_assignment["AccountAssignmentDeletionStatus"]["RequestId"]
+    )
+
+    log.info("checked account assignment status", result=res)
+
+    # log the success or failure of the grant
     if res["AccountAssignmentDeletionStatus"]["Status"] != "SUCCEEDED":
-        raise Exception(f'Error deleting account assigment: {res["AccountAssignmentDeletionStatus"]["FailureReason"]}')
-        
-    print('Successfully revoked')
+        raise Exception(
+            f'Error deleting account assigment: {res["AccountAssignmentDeletionStatus"]["FailureReason"]}'
+        )
 
 
 @provider.config_validator(name="Verify AWS organization access")
 def can_describe_organization(p: Provider, diagnostics: diagnostics.Logs) -> None:
-   
     res = p.org_client.describe_organization()
-    
+
     if len(res["Organization"]) > 0:
         diagnostics.info("Successfully described org")
 
-@provider.config_validator(name="Assume AWS SSO Access Role")
-def can_assume_sso_role(p: Provider, diagnostics: diagnostics.Logs) -> None:
-   
-    diagnostics.info("Some message")
 
 @provider.config_validator(name="List Users")
 def can_list_users(p: Provider, diagnostics: diagnostics.Logs) -> None:
-    res = p.idstore_client.list_users(IdentityStoreId=p.identity_store_id.get())
-    
-    if len(res["Users"]) >= 0:
-        diagnostics.info("Successfully pulled users ")
+    res = p.idstore_client.list_users(IdentityStoreId=p.sso_identity_store_id.get())
+
+    user_count = len(res["Users"])
+    diagnostics.info(f"found {user_count} users")
 
 
 def next_token(page: typing.Optional[str]) -> dict:
@@ -292,7 +263,6 @@ def next_token(page: typing.Optional[str]) -> dict:
     if page is None:
         return {}  # type: ignore
     return {"NextToken": page}
-
 
 
 class ListChildrenForOU(tasks.Task):
@@ -346,14 +316,20 @@ class ListAccountsForOU(tasks.Task):
             ParentId=self.parent_id, ChildType="ACCOUNT", **next_token(self.page)
         )
         for child in res["Children"]:
-            
             if child.get("Type") == "ACCOUNT":
                 tasks.call(
-                    DescribeAccount(account_id=child.get("Id"), org_unit=self.parent_id, ou_path=self.ou_path),
+                    DescribeAccount(
+                        account_id=child.get("Id"),
+                        org_unit=self.parent_id,
+                        ou_path=self.ou_path,
+                    ),
                 )
             if child.get("Type") == "ORGANIZATIONAL_UNIT":
                 tasks.call(
-                    ListAccountsForOU(parent_id=child.get("Id"), ou_path="/".join(self.ou_path,child.get("Id")))
+                    ListAccountsForOU(
+                        parent_id=child.get("Id"),
+                        ou_path="/".join(self.ou_path, child.get("Id")),
+                    )
                 )
         if res.get("NextToken") is not None:
             # iterate through pages
@@ -369,7 +345,11 @@ class DescribeAccount(tasks.Task):
     def run(self, p):
         res = p.org_client.describe_account(AccountId=self.account_id)
         name = res["Account"].get("Name")
-        acc = Account(id=self.account_id,parent_org_unit=self.org_unit,name=name,org_unit_path=self.ou_path
+        acc = Account(
+            id=self.account_id,
+            parent_org_unit=self.org_unit,
+            name=name,
+            org_unit_path=self.ou_path,
         )
 
         # find the tags associated with the account
@@ -400,7 +380,7 @@ class ListPermissionSets(tasks.Task):
 
     def run(self, p: Provider):
         res = p.sso_client.list_permission_sets(
-            InstanceArn=p.instance_arn.get(), **next_token(self.page)
+            InstanceArn=p.sso_instance_arn.get(), **next_token(self.page)
         )
         for ps in res["PermissionSets"]:
             tasks.call(
@@ -420,7 +400,8 @@ class DescribePermissionSet(tasks.Task):
 
     def run(self, p: Provider):
         res = p.sso_client.describe_permission_set(
-            InstanceArn=p.instance_arn.get(), PermissionSetArn=self.permission_set_arn
+            InstanceArn=p.sso_instance_arn.get(),
+            PermissionSetArn=self.permission_set_arn,
         )
         ps = res["PermissionSet"]
 
@@ -438,7 +419,7 @@ class ListManagedPoliciesInPermissionSet(tasks.Task):
 
     def run(self, p: Provider):
         res = p.sso_client.list_managed_policies_in_permission_set(
-            InstanceArn=p.instance_arn.get(),
+            InstanceArn=p.sso_instance_arn.get(),
             PermissionSetArn=self.permission_set_arn,
             **next_token(self.page),
         )
@@ -468,7 +449,7 @@ class ListAccountAssignments(tasks.Task):
 
     def run(self, p: Provider):
         res = p.sso_client.list_accounts_for_provisioned_permission_set(
-            InstanceArn=p.instance_arn.get(),
+            InstanceArn=p.sso_instance_arn.get(),
             PermissionSetArn=self.permission_set_arn,
             **next_token(self.page),
         )
@@ -490,7 +471,7 @@ class DescribeAccountAssignment(tasks.Task):
 
     def run(self, p: Provider):
         res = p.sso_client.list_account_assignments(
-            InstanceArn=p.instance_arn.get(),
+            InstanceArn=p.sso_instance_arn.get(),
             AccountId=self.account_id,
             PermissionSetArn=self.permission_set_arn,
             **next_token(self.page),
@@ -526,7 +507,7 @@ class ListUsers(tasks.Task):
 
     def run(self, p: Provider):
         res = p.idstore_client.list_users(
-            IdentityStoreId=p.identity_store_id.get(), **next_token(self.page)
+            IdentityStoreId=p.sso_identity_store_id.get(), **next_token(self.page)
         )
         for u in res["Users"]:
             primary_email = next(
@@ -538,7 +519,9 @@ class ListUsers(tasks.Task):
                 None,
             )
             if primary_email is not None and primary_email != "":
-                resources.register(User(id=u["UserId"], email=primary_email, name=primary_email))
+                resources.register(
+                    User(id=u["UserId"], email=primary_email, name=primary_email)
+                )
 
         if res.get("NextToken") is not None:
             self.page = res.get("NextToken")
@@ -550,7 +533,7 @@ class ListGroups(tasks.Task):
 
     def run(self, p: Provider):
         res = p.idstore_client.list_groups(
-            IdentityStoreId=p.identity_store_id.get(), **next_token(self.page)
+            IdentityStoreId=p.sso_identity_store_id.get(), **next_token(self.page)
         )
         for g in res["Groups"]:
             id = g["GroupId"]
@@ -572,7 +555,7 @@ class ListGroupMemberships(tasks.Task):
 
     def run(self, p: Provider):
         res = p.idstore_client.list_group_memberships(
-            IdentityStoreId=p.identity_store_id.get(),
+            IdentityStoreId=p.sso_identity_store_id.get(),
             GroupId=self.group_id,
             **next_token(self.page),
         )
@@ -599,7 +582,7 @@ def fetch_groups(p: Provider):
     tasks.call(ListGroups())
 
 
-#got implementation from this stackoverflow https://stackoverflow.com/questions/44171849/aws-boto3-assumerole-example-which-includes-role-usage
+# got implementation from this stackoverflow https://stackoverflow.com/questions/44171849/aws-boto3-assumerole-example-which-includes-role-usage
 def get_boto3_session(role_arn=None):
     session = boto3.Session()
     if not role_arn:
@@ -612,8 +595,7 @@ def get_boto3_session(role_arn=None):
     )
     botocore_session = botocore.session.Session()
     botocore_session._credentials = DeferredRefreshableCredentials(
-        method='assume-role',
-        refresh_using=fetcher.fetch_credentials
+        method="assume-role", refresh_using=fetcher.fetch_credentials
     )
 
     return boto3.Session(botocore_session=botocore_session)
