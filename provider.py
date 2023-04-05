@@ -585,7 +585,7 @@ def fetch_groups(p: Provider):
 # got implementation from this stackoverflow https://stackoverflow.com/questions/44171849/aws-boto3-assumerole-example-which-includes-role-usage
 def get_boto3_session(role_arn=None):
     session = boto3.Session()
-    if not role_arn:
+    if not role_arn or role_arn == "":
         return session
 
     fetcher = AssumeRoleCredentialFetcher(
