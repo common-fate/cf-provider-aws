@@ -2,3 +2,7 @@ name = "aws"
 publisher = "common-fate"
 version = "v0.6.1"
 language = "python3.9"
+[meta]
+  icon = "aws"
+  displayName = "AWS"
+  source = "https://github.com/common-fate/cf-provider-aws"
