@@ -4,5 +4,5 @@ version = "v0.6.1"
 language = "python3.9"
 [meta]
   icon = "aws"
-  displayName = "AWS"
+  display_name = "AWS"
   source = "https://github.com/common-fate/cf-provider-aws"
