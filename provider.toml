@@ -1,6 +1,6 @@
 name = "aws"
 publisher = "common-fate"
-version = "v0.6.1"
+version = "v0.6.2-alpha2"
 language = "python3.9"
 [meta]
   icon = "aws"

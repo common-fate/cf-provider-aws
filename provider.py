@@ -77,15 +77,16 @@ class Provider(provider.Provider):
     )
 
     def setup(self):
+        config = botocore.config.Config(retries={'max_attempts': 20})
         self.org_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client(
-            "organizations", region_name=self.sso_region.get()
+            "organizations", region_name=self.sso_region.get(), config=config
         )
         self.sso_client = get_boto3_session(role_arn=self.sso_role_arn.get()).client(
-            "sso-admin", region_name=self.sso_region.get()
+            "sso-admin", region_name=self.sso_region.get(), config=config
         )
         self.idstore_client = get_boto3_session(
             role_arn=self.sso_role_arn.get()
-        ).client("identitystore", region_name=self.sso_region.get())
+        ).client("identitystore", region_name=self.sso_region.get(), config=config)
 
     def get_user(self, subject) -> SSOUser:
         # try get user first by filtering username
@@ -593,11 +594,13 @@ def get_boto3_session(role_arn=None):
         source_credentials=session.get_credentials(),
         role_arn=role_arn,
     )
+
     botocore_session = botocore.session.Session()
     botocore_session._credentials = DeferredRefreshableCredentials(
         method="assume-role", refresh_using=fetcher.fetch_credentials
     )
 
+    # pass config object to boto3 client
     return boto3.Session(botocore_session=botocore_session)
 
 
