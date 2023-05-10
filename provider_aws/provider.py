@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import typing
-from commonfate_provider import provider, target, access, diagnostics, resources, tasks
+import provider
+from provider import target, access, diagnostics, resources, tasks
 import boto3
 import botocore.session
 from botocore.credentials import (
